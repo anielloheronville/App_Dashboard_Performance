@@ -4,13 +4,7 @@ import psycopg2
 import os
 import plotly.express as px
 import plotly.graph_objects as go
-import warnings
-
 from dotenv import load_dotenv
-
-# --- SILENCIAR AVISOS DO PANDAS/STREAMLIT ---
-# Isso limpa o log do Render, removendo avisos de depreciação futura
-warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
 
 # Tenta carregar .env, se não achar, tenta .env.txt
 if not load_dotenv():
@@ -48,6 +42,7 @@ st.markdown("""
         background-color: #8cc63f;
         color: #263318;
         font-weight: bold;
+        width: 100%;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -86,7 +81,8 @@ OPCOES_CORRETORES = [
 ]
 
 # --- CONEXÃO COM O BANCO DE DADOS ---
-@st.cache_data(ttl=60) 
+# Alterado TTL para 15 segundos para atualizar mais rápido automaticamente
+@st.cache_data(ttl=15) 
 def load_data():
     DATABASE_URL = os.environ.get("DATABASE_URL")
     
@@ -96,7 +92,7 @@ def load_data():
 
     try:
         conn = psycopg2.connect(DATABASE_URL)
-        # ATUALIZADO: Inclui nota_atendimento
+        # --- ATUALIZAÇÃO: Adicionado nota_atendimento na query ---
         query = """
         SELECT 
             id, 
@@ -121,27 +117,36 @@ def load_data():
         df['comprou_1o_lote'] = df['comprou_1o_lote'].fillna('Não')
         df['nivel_interesse'] = df['nivel_interesse'].fillna('Não Classificado')
         
-        # Tratamento da Nota: Null vira 0 (Não Avaliado)
-        df['nota_atendimento'] = df['nota_atendimento'].fillna(0).astype(int)
+        # --- NOVO: Tratamento da nota ---
+        # Converte para numérico e preenche vazios com 0
+        df['nota_atendimento'] = pd.to_numeric(df['nota_atendimento'], errors='coerce').fillna(0)
         
         return df
     except Exception as e:
         st.error(f"Erro ao carregar dados: {e}")
         return pd.DataFrame()
 
-# --- CARREGAR DADOS ---
-df = load_data()
-
-# --- BARRA LATERAL (FILTROS) ---
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/263/263115.png", width=50) 
+# --- BARRA LATERAL (FILTROS E UPDATE) ---
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/263/263115.png", width=50)
 st.sidebar.title("Filtros Araguaia")
+
+# --- NOVO: BOTÃO DE ATUALIZAÇÃO MANUAL ---
+if st.sidebar.button("🔄 Atualizar Dados Agora"):
+    st.cache_data.clear()
+    st.rerun()
+
+# Carrega os dados
+df = load_data()
 
 if not df.empty:
     # Filtro de Data
     min_date = df['data_hora'].min().date()
     max_date = df['data_hora'].max().date()
     
-    start_date, end_date = st.sidebar.date_input("Período", [min_date, max_date])
+    start_date, end_date = st.sidebar.date_input(
+        "Período",
+        [min_date, max_date]
+    )
     
     # Filtro de Empreendimento
     lista_empreendimentos = ['Todos'] + list(df['loteamento'].unique())
@@ -151,7 +156,6 @@ if not df.empty:
     corretores_no_banco = list(df['nome_corretor'].unique())
     lista_completa_corretores = sorted(list(set(OPCOES_CORRETORES + corretores_no_banco)))
     lista_filtro = ['Todos'] + lista_completa_corretores
-    
     filtro_corretor = st.sidebar.selectbox("Corretor", lista_filtro)
 
     # APLICAR FILTROS
@@ -183,30 +187,25 @@ if not df_filtered.empty:
     interesse_alto = len(df_filtered[df_filtered['nivel_interesse'] == 'Alto'])
     taxa_interesse_alto = (interesse_alto / total_atendimentos * 100) if total_atendimentos > 0 else 0
     
-    # --- CÁLCULO DE AVALIAÇÕES (NOVO - ESCALA 1 a 5) ---
-    df_avaliados = df_filtered[df_filtered['nota_atendimento'] > 0]
-    qtd_avaliacoes = len(df_avaliados)
-    
-    if qtd_avaliacoes > 0:
-        media_geral_nota = df_avaliados['nota_atendimento'].mean()
-    else:
-        media_geral_nota = 0
+    # Cálculo da Média de Notas (Considerando apenas quem deu nota > 0)
+    avaliacoes_validas = df_filtered[df_filtered['nota_atendimento'] > 0]
+    media_nota = avaliacoes_validas['nota_atendimento'].mean() if not avaliacoes_validas.empty else 0
+    qtd_avaliacoes = len(avaliacoes_validas)
 
-    # --- LINHA DE MÉTRICAS (5 COLUNAS) ---
+    # --- LINHA DE MÉTRICAS (Agora com 5 colunas para caber a Nota) ---
     col1, col2, col3, col4, col5 = st.columns(5)
-    
     with col1:
-        st.metric("Total Atendimentos", total_atendimentos)
+        st.metric("Total de Atendimentos", total_atendimentos)
     with col2:
-        st.metric("Vendas (1º Lote)", f"{conversoes}", delta=f"{taxa_conversao:.1f}% Conv.")
+        st.metric("Realizaram Sonho", f"{conversoes}", delta=f"{taxa_conversao:.1f}%")
     with col3:
-        st.metric("Interesse Alto", interesse_alto, delta=f"{taxa_interesse_alto:.1f}% do total")
+        st.metric("Interesse Alto", interesse_alto, delta=f"{taxa_interesse_alto:.1f}%")
     with col4:
-        # Métrica de Qualidade
-        st.metric("⭐ Nota Média (1-5)", f"{media_geral_nota:.2f}", delta=f"{qtd_avaliacoes} avaliações")
+        # Mostra a média e a quantidade de votos
+        st.metric("Média Avaliação (1-5)", f"{media_nota:.1f} ⭐", f"{qtd_avaliacoes} votos")
     with col5:
         top_corretor = df_filtered['nome_corretor'].mode()[0] if not df_filtered.empty else "-"
-        st.metric("Top Volumetria", top_corretor)
+        st.metric("Corretor Destaque", top_corretor)
 
     st.markdown("---")
 
@@ -214,86 +213,48 @@ if not df_filtered.empty:
     c1, c2 = st.columns(2)
 
     with c1:
-        st.subheader("🏘️ Volume por Empreendimento")
+        st.subheader("🏘️ Por Empreendimento")
         vol_emp = df_filtered['loteamento'].value_counts().reset_index()
         vol_emp.columns = ['Empreendimento', 'Volume']
         fig_emp = px.bar(vol_emp, x='Empreendimento', y='Volume', color_discrete_sequence=['#263318'], text='Volume')
-        st.plotly_chart(fig_emp, width="stretch") # CORRIGIDO width
+        st.plotly_chart(fig_emp, use_container_width=True)
 
     with c2:
-        st.subheader("💰 Funil de Conversão")
+        st.subheader("🧑‍💼 Por Corretor")
+        vol_corr = df_filtered['nome_corretor'].value_counts().reset_index().head(10)
+        vol_corr.columns = ['Corretor', 'Volume']
+        fig_corr = px.bar(vol_corr, x='Volume', y='Corretor', orientation='h', color_discrete_sequence=['#8cc63f'], text='Volume')
+        fig_corr.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_corr, use_container_width=True)
+
+    # --- GRÁFICOS LINHA 2 ---
+    c3, c4 = st.columns(2)
+
+    with c3:
+        st.subheader("🔥 Nível de Interesse")
+        fig_pie = px.pie(df_filtered, names='nivel_interesse', hole=0.4, color_discrete_sequence=['#8cc63f', '#263318', '#4a5e35'])
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with c4:
+        st.subheader("💰 Conversão por Interesse")
+        # Gráfico empilhado
         cross_tab = pd.crosstab(df_filtered['nivel_interesse'], df_filtered['comprou_1o_lote']).reset_index()
         cross_tab_melt = cross_tab.melt(id_vars='nivel_interesse', var_name='Comprou', value_name='Qtd')
         fig_bar_stack = px.bar(cross_tab_melt, x="nivel_interesse", y="Qtd", color="Comprou", 
                                color_discrete_map={'Sim': '#8cc63f', 'Não': '#263318'}, barmode='group')
-        st.plotly_chart(fig_bar_stack, width="stretch") # CORRIGIDO width
-
-    # --- GRÁFICOS LINHA 2: QUALIDADE (ESCALA 1-5) ---
-    st.markdown("### ⭐ Qualidade do Atendimento")
-    c3, c4 = st.columns(2)
-
-    with c3:
-        st.subheader("🏆 Ranking de Nota Média")
-        if not df_avaliados.empty:
-            ranking = df_avaliados.groupby('nome_corretor')['nota_atendimento'].agg(['mean', 'count']).reset_index()
-            # Filtra apenas quem tem avaliações
-            ranking = ranking[ranking['count'] > 0].sort_values(by='mean', ascending=False).head(10)
-            
-            fig_qualidade = px.bar(
-                ranking, 
-                x='mean', 
-                y='nome_corretor', 
-                orientation='h',
-                text_auto='.2f',
-                color='mean',
-                color_continuous_scale=['#d9534f', '#f0ad4e', '#8cc63f'],
-                range_color=[1, 5], # TRAVA A ESCALA DE COR EM 5
-                labels={'mean': 'Média (1-5)', 'nome_corretor': 'Corretor'}
-            )
-            # Ajuste visual do eixo X para não cortar em 5 exato
-            fig_qualidade.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Nota Média (1 a 5)", xaxis=dict(range=[0, 5.5]))
-            st.plotly_chart(fig_qualidade, width="stretch")
-        else:
-            st.info("Ainda não há avaliações suficientes.")
-
-    with c4:
-        st.subheader("📊 Distribuição das Notas")
-        if not df_avaliados.empty:
-            # AJUSTE PARA ESCALA 1-5 (nbins=5 e eixo X linear)
-            fig_hist = px.histogram(
-                df_avaliados, 
-                x="nota_atendimento", 
-                nbins=5, 
-                color_discrete_sequence=['#8cc63f'],
-                text_auto=True
-            )
-            fig_hist.update_layout(
-                bargap=0.2, 
-                xaxis_title="Nota (1 a 5)", 
-                yaxis_title="Quantidade",
-                xaxis=dict(tickmode='linear', dtick=1) # FORÇA NÚMEROS INTEIROS NO EIXO X
-            )
-            st.plotly_chart(fig_hist, width="stretch")
-        else:
-            st.info("Sem dados de avaliações no período.")
-
-    # --- GRÁFICOS LINHA 3: VOLUMETRIA ---
-    st.markdown("### 🧑‍💼 Produtividade (Volume)")
-    vol_corr = df_filtered['nome_corretor'].value_counts().reset_index().head(15)
-    vol_corr.columns = ['Corretor', 'Volume']
-    fig_corr = px.bar(vol_corr, x='Volume', y='Corretor', orientation='h', color_discrete_sequence=['#263318'], text='Volume')
-    fig_corr.update_layout(yaxis={'categoryorder':'total ascending'}, height=500)
-    st.plotly_chart(fig_corr, width="stretch") # CORRIGIDO width
+        st.plotly_chart(fig_bar_stack, use_container_width=True)
 
     # --- DADOS BRUTOS ---
-    with st.expander("📋 Ver Dados Detalhados (Com Notas)"):
-        colunas_ordem = ['data_hora', 'nome_corretor', 'nome', 'nota_atendimento', 'nivel_interesse', 'comprou_1o_lote', 'loteamento']
-        # Tenta exibir ordenado, se as colunas existirem
-        cols_existentes = [c for c in colunas_ordem if c in df_filtered.columns]
-        st.dataframe(df_filtered[cols_existentes].sort_values(by='data_hora', ascending=False))
+    with st.expander("📋 Ver Dados Brutos (Incluindo Notas)"):
+        # Mostrando colunas principais primeiro
+        cols_order = ['id', 'data_hora', 'nome', 'nota_atendimento', 'nome_corretor', 'loteamento', 'comprou_1o_lote']
+        # Pega apenas as colunas que existem no df (para evitar erro se mudar algo no futuro)
+        cols_to_show = [c for c in cols_order if c in df_filtered.columns] + [c for c in df_filtered.columns if c not in cols_order]
+        
+        st.dataframe(df_filtered[cols_to_show].sort_values(by='data_hora', ascending=False))
         
         csv = df_filtered.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Baixar CSV Completo", csv, "kpis_araguaia_v2.csv", "text/csv")
+        st.download_button("📥 Baixar CSV", csv, "kpis_araguaia.csv", "text/csv")
 
 else:
-    st.warning("Nenhum dado encontrado para os filtros selecionados.")
+    st.warning("Nenhum dado encontrado.")
